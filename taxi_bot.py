@@ -1,4 +1,4 @@
-# taxi_bot.py (Версія 7.0 - Фінальна, з локальною БД в репозиторії)
+# taxi_bot.py (Версія 8.0 - Адмін-панель налаштувань та покращене меню)
 
 import asyncio
 import sqlite3
@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import CommandStart, Command
-from aiogram.types import Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.enums import ParseMode
@@ -16,29 +16,40 @@ from aiogram.enums import ParseMode
 # --- НАЛАШТУВАННЯ ---
 # Ці дані потрібно вказати на хостингу в "Environment Variables"
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-REGISTRATION_PASSWORD = os.environ.get("REGISTRATION_PASSWORD", "taxi_driver_2025")
+# Тепер пароль за замовчуванням буде в коді, але його можна змінити через адмінку
+DEFAULT_REGISTRATION_PASSWORD = "taxi_driver_2025"
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
-USERS_PER_PAGE = 5  # Кількість водіїв на сторінці в адмін-панелі
+USERS_PER_PAGE = 5
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # --- БАЗА ДАНИХ (SQLite) ---
-# ВАЖЛИВО: Файл БД буде створюватися в тій самій папці, що і код.
+# Файл БД буде створюватися в тій самій папці, що і код.
 # На Render цей файл буде зникати при кожному перезапуску.
 DB_FILE = "taxi_drivers.db"
 
 def init_db():
-    """Створює файли в базі даних, якщо їх ще не існує."""
+    """Створює/оновлює таблиці в базі даних."""
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
+        # Таблиця водіїв
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS drivers (
                 user_id INTEGER PRIMARY KEY, name TEXT NOT NULL, car_brand TEXT, car_plate TEXT, platform TEXT, registration_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )''')
+        # Таблиця транзакцій
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS transactions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, driver_id INTEGER NOT NULL, type TEXT NOT NULL, amount REAL NOT NULL, date TIMESTAMP DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (driver_id) REFERENCES drivers (user_id)
             )''')
+        # НОВА ТАБЛИЦЯ: Налаштування
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )''')
+        # Встановлюємо пароль за замовчуванням, якщо його немає в налаштуваннях
+        cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", ('password', DEFAULT_REGISTRATION_PASSWORD))
         conn.commit()
 
 # --- СТАНИ FSM ---
@@ -60,6 +71,10 @@ class AdminEdit(StatesGroup):
     choosing_user = State()
     choosing_field = State()
     entering_new_value = State()
+
+class AdminSettings(StatesGroup):
+    choosing_setting = State()
+    entering_new_password = State()
 
 # --- КЛАВІАТУРИ ---
 def get_main_menu_keyboard():
@@ -92,8 +107,7 @@ async def get_admin_user_list_keyboard(page: int = 0) -> InlineKeyboardMarkup:
 
 # --- ДОПОМІЖНІ ФУНКЦІЇ ---
 def format_currency(amount: float) -> str:
-    if amount == int(amount):
-        return f"{int(amount)} грн"
+    if amount == int(amount): return f"{int(amount)} грн"
     return f"{amount:.2f} грн"
 
 async def is_registered(user_id: int) -> bool:
@@ -102,9 +116,7 @@ async def is_registered(user_id: int) -> bool:
             cursor = conn.cursor()
             cursor.execute("SELECT 1 FROM drivers WHERE user_id = ?", (user_id,))
             return cursor.fetchone() is not None
-    except sqlite3.OperationalError as e:
-        logging.error(f"Помилка доступу до бази даних: {e}. Можливо, файл ще не створено.")
-        return False
+    except sqlite3.OperationalError: return False
 
 # --- ОСНОВНА ЛОГІКА БОТА ---
 dp = Dispatcher()
@@ -115,13 +127,18 @@ async def cmd_start(message: Message, state: FSMContext):
     if await is_registered(message.from_user.id):
         await message.answer(f"З поверненням, {message.from_user.first_name}! 👋", reply_markup=get_main_menu_keyboard())
     else:
-        await message.answer("👋 Вітаю у боті для водіїв!\n\nДля початку роботи, будь ласка, введіть пароль для реєстрації:")
+        await message.answer("👋 Вітаю у боті для водіїв!\n\nЦе ваш особистий помічник для ведення фінансів. Щоб почати, натисніть кнопку 'Почати' нижче або введіть пароль для реєстрації.")
         await state.set_state(Registration.waiting_for_password)
 
 @dp.message(Registration.waiting_for_password)
 async def process_password(message: Message, state: FSMContext):
-    if message.text == REGISTRATION_PASSWORD:
-        await message.answer("✅ Пароль вірний! Тепер введіть ваше ім'я та прізвище:")
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM settings WHERE key = 'password'")
+        current_password = cursor.fetchone()[0]
+
+    if message.text == current_password:
+        await message.answer("✅ Пароль вірний! Як до вас звертатись?\n(Введіть ім'я та, за бажанням, прізвище):")
         await state.set_state(Registration.waiting_for_name)
     else:
         await message.answer("❌ Неправильний пароль. Спробуйте ще раз.")
@@ -129,19 +146,19 @@ async def process_password(message: Message, state: FSMContext):
 @dp.message(Registration.waiting_for_name)
 async def process_name(message: Message, state: FSMContext):
     await state.update_data(name=message.text)
-    await message.answer("Чудово! Тепер вкажіть марку та модель вашого авто (напр., Kia Optima):")
+    await message.answer("Чудово! Вкажіть марку та модель авто (напр., Kia Optima):")
     await state.set_state(Registration.waiting_for_car_brand)
 
 @dp.message(Registration.waiting_for_car_brand)
 async def process_car_brand(message: Message, state: FSMContext):
     await state.update_data(car_brand=message.text)
-    await message.answer("Прийнято. Введіть номерний знак автомобіля (напр., BC 1234 HI):")
+    await message.answer("Прийнято. Введіть номерний знак (напр., BC 1234 HI):")
     await state.set_state(Registration.waiting_for_car_plate)
 
 @dp.message(Registration.waiting_for_car_plate)
 async def process_car_plate(message: Message, state: FSMContext):
     await state.update_data(car_plate=message.text.upper())
-    await message.answer("Майже готово! На якій платформі працюєте? (напр., Uber, Bolt, Uklon)")
+    await message.answer("Майже готово! На якій платформі працюєте? (напр., Uber, Bolt)")
     await state.set_state(Registration.waiting_for_platform)
 
 @dp.message(Registration.waiting_for_platform)
@@ -149,10 +166,7 @@ async def process_platform_and_finish_reg(message: Message, state: FSMContext):
     user_data = await state.get_data()
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO drivers (user_id, name, car_brand, car_plate, platform) VALUES (?, ?, ?, ?, ?)",
-            (message.from_user.id, user_data['name'], user_data['car_brand'], user_data['car_plate'], message.text)
-        )
+        cursor.execute("INSERT INTO drivers (user_id, name, car_brand, car_plate, platform) VALUES (?, ?, ?, ?, ?)", (message.from_user.id, user_data['name'], user_data['car_brand'], user_data['car_plate'], message.text))
         conn.commit()
     await state.clear()
     await message.answer("🎉 Реєстрацію успішно завершено! Ласкаво просимо!", reply_markup=get_main_menu_keyboard())
@@ -189,7 +203,7 @@ async def process_transaction_amount(message: Message, state: FSMContext):
         await message.answer(f"✅ Успішно додано: **{transaction_type.capitalize()}** на суму **{format_currency(amount)}**.", parse_mode=ParseMode.MARKDOWN)
         await state.clear()
     except ValueError:
-        await message.answer("❌ Помилка. Будь ласка, введіть числове значення (напр., 150 або 95.50).")
+        await message.answer("❌ Помилка. Введіть числове значення (напр., 150 або 95.50).")
 
 # --- СТАТИСТИКА ---
 @dp.message(F.text == "📊 Моя Статистика")
@@ -202,7 +216,6 @@ async def show_my_stats(message: Message):
         monthly_stats = cursor.fetchall()
         cursor.execute("SELECT type, SUM(amount) FROM transactions WHERE driver_id = ? GROUP BY type", (user_id,))
         total_stats = cursor.fetchall()
-
     def format_stats(title, stats):
         text = f"**{title}**\n"
         income = sum(amt for type, amt in stats if type in ['дохід', 'чай'])
@@ -233,12 +246,10 @@ async def show_advanced_stats(callback: CallbackQuery):
         start_date, end_date, title = (today - timedelta(days=today.weekday())).strftime('%Y-%m-%d'), today.strftime('%Y-%m-%d'), "📈 Статистика за цей тиждень"
     else: # month
         start_date, end_date, title = today.strftime('%Y-%m-01'), today.strftime('%Y-%m-%d'), "📈 Статистика за цей місяць"
-    
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT type, SUM(amount) FROM transactions WHERE driver_id = ? AND date(date) BETWEEN ? AND ? GROUP BY type", (callback.from_user.id, start_date, end_date))
         stats = cursor.fetchall()
-    
     income = sum(amt for type, amt in stats if type in ['дохід', 'чай'])
     expenses = sum(amt for type, amt in stats if type not in ['дохід', 'чай'])
     text = f"**{title}**\n\n"
@@ -259,7 +270,6 @@ async def show_rating(message: Message):
         query_all_time = "SELECT d.name, d.car_brand, d.car_plate, SUM(t.amount) FROM transactions t JOIN drivers d ON t.driver_id = d.user_id WHERE t.type IN ('дохід', 'чай') GROUP BY d.user_id ORDER BY SUM(t.amount) DESC LIMIT 10"
         cursor.execute(query_all_time)
         all_time_rating = cursor.fetchall()
-
     def format_rating(title, rating_data):
         text = f"**{title}**\n"
         if not rating_data: return text + "Ще немає даних для рейтингу.\n"
@@ -361,10 +371,61 @@ async def admin_enter_new_value(message: Message, state: FSMContext):
     await message.answer("✅ Дані водія успішно оновлено!")
     await state.clear()
     keyboard = await get_admin_user_list_keyboard()
-    await message.answer("Оберіть наступного водія для редагування або натисніть /start, щоб повернутись у головне меню:", reply_markup=keyboard)
+    await message.answer("Оберіть наступного водія для редагування:", reply_markup=keyboard)
     await state.set_state(AdminEdit.choosing_user)
 
+# --- АДМІН-ПАНЕЛЬ НАЛАШТУВАНЬ ---
+@dp.message(Command("settings"))
+async def admin_settings(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID: return
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM settings WHERE key = 'password'")
+        current_password = cursor.fetchone()[0]
+    text = (f"⚙️ **Панель налаштувань** ⚙️\n\n"
+            f"Тут ви можете змінювати основні параметри бота.\n\n"
+            f"Поточний пароль для реєстрації: `{current_password}`")
+    buttons = [[InlineKeyboardButton(text="🔑 Змінити пароль", callback_data="settings_change_password")]]
+    await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode=ParseMode.MARKDOWN)
+    await state.set_state(AdminSettings.choosing_setting)
+
+@dp.callback_query(AdminSettings.choosing_setting, F.data == "settings_change_password")
+async def settings_change_password_prompt(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text("Введіть новий пароль для реєстрації водіїв:")
+    await state.set_state(AdminSettings.entering_new_password)
+    await callback.answer()
+
+@dp.message(AdminSettings.entering_new_password)
+async def settings_set_new_password(message: Message, state: FSMContext):
+    new_password = message.text
+    if len(new_password) < 4:
+        await message.answer("❌ Пароль занадто короткий. Введіть пароль довжиною мінімум 4 символи.")
+        return
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE settings SET value = ? WHERE key = 'password'", (new_password,))
+        conn.commit()
+    await state.clear()
+    await message.answer(f"✅ Пароль успішно змінено на `{new_password}`", parse_mode=ParseMode.MARKDOWN)
+    await cmd_start(message, state) # Повертаємо до головного меню
+
+# --- КОМАНДА ДЛЯ ПОВЕРНЕННЯ ГОЛОВНОГО МЕНЮ ---
+@dp.message(Command("menu"))
+async def show_main_menu(message: Message, state: FSMContext):
+    await state.clear() # Скидаємо будь-які активні стани
+    await message.answer("Головне меню:", reply_markup=get_main_menu_keyboard())
+
 # --- ОСНОВНА ФУНКЦІЯ ЗАПУСКУ ---
+async def set_main_menu(bot: Bot):
+    """Створює кнопку 'Меню' в інтерфейсі Telegram."""
+    main_menu_commands = [
+        BotCommand(command="/menu", description="Показати головне меню"),
+        BotCommand(command="/admin", description="Адмін-панель (для адміна)"),
+        BotCommand(command="/settings", description="Налаштування (для адміна)"),
+        BotCommand(command="/start", description="Перезапустити бота")
+    ]
+    await bot.set_my_commands(main_menu_commands)
+
 async def main():
     if not BOT_TOKEN:
         logging.critical("ПОМИЛКА: не знайдено BOT_TOKEN. Перевірте змінні оточення на хостингу.")
@@ -372,6 +433,8 @@ async def main():
 
     bot = Bot(token=BOT_TOKEN)
     init_db()
+    await set_main_menu(bot)
+    
     logging.info("Бот запускається...")
     await dp.start_polling(bot)
 
