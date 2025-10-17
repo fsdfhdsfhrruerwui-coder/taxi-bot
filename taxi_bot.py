@@ -1,4 +1,4 @@
-# taxi_bot.py (Версія 4.0 - Фінальна)
+# taxi_bot.py (Версія 7.0 - Фінальна, з локальною БД в репозиторії)
 
 import asyncio
 import sqlite3
@@ -14,43 +14,34 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.enums import ParseMode
 
 # --- НАЛАШТУВАННЯ ---
-# Ці дані потрібно буде вказати на хостингу в "Environment Variables"
+# Ці дані потрібно вказати на хостингу в "Environment Variables"
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-REGISTRATION_PASSWORD = os.environ.get("REGISTRATION_PASSWORD", "taxi_driver_2025") # Пароль за замовчуванням
-ADMIN_ID = int(os.environ.get("ADMIN_ID", 0)) # Ваш Telegram ID
-USERS_PER_PAGE = 5 # Кількість водіїв на одній сторінці в адмін-панелі
+REGISTRATION_PASSWORD = os.environ.get("REGISTRATION_PASSWORD", "taxi_driver_2025")
+ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
+USERS_PER_PAGE = 5  # Кількість водіїв на сторінці в адмін-панелі
 
-# Налаштування логування для відстеження роботи бота
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # --- БАЗА ДАНИХ (SQLite) ---
+# ВАЖЛИВО: Файл БД буде створюватися в тій самій папці, що і код.
+# На Render цей файл буде зникати при кожному перезапуску.
 DB_FILE = "taxi_drivers.db"
 
 def init_db():
-    """Створює таблиці в базі даних, якщо їх ще не існує."""
+    """Створює файли в базі даних, якщо їх ще не існує."""
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS drivers (
-                user_id INTEGER PRIMARY KEY,
-                name TEXT NOT NULL,
-                car_brand TEXT,
-                car_plate TEXT,
-                platform TEXT,
-                registration_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                user_id INTEGER PRIMARY KEY, name TEXT NOT NULL, car_brand TEXT, car_plate TEXT, platform TEXT, registration_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )''')
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS transactions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                driver_id INTEGER NOT NULL,
-                type TEXT NOT NULL,
-                amount REAL NOT NULL,
-                date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (driver_id) REFERENCES drivers (user_id)
+                id INTEGER PRIMARY KEY AUTOINCREMENT, driver_id INTEGER NOT NULL, type TEXT NOT NULL, amount REAL NOT NULL, date TIMESTAMP DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (driver_id) REFERENCES drivers (user_id)
             )''')
         conn.commit()
 
-# --- СТАНИ (FSM) для покрокових дій ---
+# --- СТАНИ FSM ---
 class Registration(StatesGroup):
     waiting_for_password = State()
     waiting_for_name = State()
@@ -72,7 +63,6 @@ class AdminEdit(StatesGroup):
 
 # --- КЛАВІАТУРИ ---
 def get_main_menu_keyboard():
-    """Повертає головне меню з кнопками."""
     buttons = [
         [KeyboardButton(text="✅ Додати Дохід/Чайові"), KeyboardButton(text="➖ Додати Витрату")],
         [KeyboardButton(text="📊 Моя Статистика"), KeyboardButton(text="📈 Розширена статистика")],
@@ -81,7 +71,6 @@ def get_main_menu_keyboard():
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True, row_width=2)
 
 async def get_admin_user_list_keyboard(page: int = 0) -> InlineKeyboardMarkup:
-    """Створює клавіатуру зі списком водіїв для редагування з пагінацією."""
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
         offset = page * USERS_PER_PAGE
@@ -89,35 +78,33 @@ async def get_admin_user_list_keyboard(page: int = 0) -> InlineKeyboardMarkup:
         users = cursor.fetchall()
         cursor.execute("SELECT COUNT(user_id) FROM drivers")
         total_users = cursor.fetchone()[0]
-
     keyboard = []
     for user_id, name in users:
         keyboard.append([InlineKeyboardButton(text=name, callback_data=f"admin_select_{user_id}")])
-
     nav_buttons = []
     if page > 0:
         nav_buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"admin_page_{page - 1}"))
     if offset + USERS_PER_PAGE < total_users:
         nav_buttons.append(InlineKeyboardButton(text="Вперед ➡️", callback_data=f"admin_page_{page + 1}"))
-
     if nav_buttons:
         keyboard.append(nav_buttons)
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
-
 # --- ДОПОМІЖНІ ФУНКЦІЇ ---
 def format_currency(amount: float) -> str:
-    """Форматує суму в ціле число, якщо вона без копійок."""
     if amount == int(amount):
         return f"{int(amount)} грн"
     return f"{amount:.2f} грн"
 
 async def is_registered(user_id: int) -> bool:
-    """Перевіряє, чи є користувач у базі даних."""
-    with sqlite3.connect(DB_FILE) as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT 1 FROM drivers WHERE user_id = ?", (user_id,))
-        return cursor.fetchone() is not None
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1 FROM drivers WHERE user_id = ?", (user_id,))
+            return cursor.fetchone() is not None
+    except sqlite3.OperationalError as e:
+        logging.error(f"Помилка доступу до бази даних: {e}. Можливо, файл ще не створено.")
+        return False
 
 # --- ОСНОВНА ЛОГІКА БОТА ---
 dp = Dispatcher()
@@ -374,18 +361,17 @@ async def admin_enter_new_value(message: Message, state: FSMContext):
     await message.answer("✅ Дані водія успішно оновлено!")
     await state.clear()
     keyboard = await get_admin_user_list_keyboard()
-    await message.answer("Оберіть наступного водія для редагування:", reply_markup=keyboard)
+    await message.answer("Оберіть наступного водія для редагування або натисніть /start, щоб повернутись у головне меню:", reply_markup=keyboard)
     await state.set_state(AdminEdit.choosing_user)
 
 # --- ОСНОВНА ФУНКЦІЯ ЗАПУСКУ ---
 async def main():
-    """Головна функція для запуску бота."""
     if not BOT_TOKEN:
         logging.critical("ПОМИЛКА: не знайдено BOT_TOKEN. Перевірте змінні оточення на хостингу.")
         return
 
     bot = Bot(token=BOT_TOKEN)
-    init_db()  # Ініціалізуємо базу даних при старті
+    init_db()
     logging.info("Бот запускається...")
     await dp.start_polling(bot)
 
