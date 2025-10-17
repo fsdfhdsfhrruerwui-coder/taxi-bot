@@ -1,4 +1,4 @@
-# taxi_bot.py (Версія 8.0 - Адмін-панель налаштувань та покращене меню)
+# taxi_bot.py (Версія 8.1 - Виправлення помилки редагування)
 
 import asyncio
 import sqlite3
@@ -14,9 +14,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.enums import ParseMode
 
 # --- НАЛАШТУВАННЯ ---
-# Ці дані потрібно вказати на хостингу в "Environment Variables"
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-# Тепер пароль за замовчуванням буде в коді, але його можна змінити через адмінку
 DEFAULT_REGISTRATION_PASSWORD = "taxi_driver_2025"
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 USERS_PER_PAGE = 5
@@ -24,31 +22,23 @@ USERS_PER_PAGE = 5
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # --- БАЗА ДАНИХ (SQLite) ---
-# Файл БД буде створюватися в тій самій папці, що і код.
-# На Render цей файл буде зникати при кожному перезапуску.
 DB_FILE = "taxi_drivers.db"
 
 def init_db():
-    """Створює/оновлює таблиці в базі даних."""
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
-        # Таблиця водіїв
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS drivers (
                 user_id INTEGER PRIMARY KEY, name TEXT NOT NULL, car_brand TEXT, car_plate TEXT, platform TEXT, registration_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )''')
-        # Таблиця транзакцій
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS transactions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, driver_id INTEGER NOT NULL, type TEXT NOT NULL, amount REAL NOT NULL, date TIMESTAMP DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (driver_id) REFERENCES drivers (user_id)
             )''')
-        # НОВА ТАБЛИЦЯ: Налаштування
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS settings (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
+                key TEXT PRIMARY KEY, value TEXT NOT NULL
             )''')
-        # Встановлюємо пароль за замовчуванням, якщо його немає в налаштуваннях
         cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", ('password', DEFAULT_REGISTRATION_PASSWORD))
         conn.commit()
 
@@ -136,7 +126,6 @@ async def process_password(message: Message, state: FSMContext):
         cursor = conn.cursor()
         cursor.execute("SELECT value FROM settings WHERE key = 'password'")
         current_password = cursor.fetchone()[0]
-
     if message.text == current_password:
         await message.answer("✅ Пароль вірний! Як до вас звертатись?\n(Введіть ім'я та, за бажанням, прізвище):")
         await state.set_state(Registration.waiting_for_name)
@@ -172,6 +161,126 @@ async def process_platform_and_finish_reg(message: Message, state: FSMContext):
     await message.answer("🎉 Реєстрацію успішно завершено! Ласкаво просимо!", reply_markup=get_main_menu_keyboard())
 
 # --- ДОДАВАННЯ ТРАНЗАКЦІЙ ---
+# ... (Цей блок без змін) ...
+
+# --- СТАТИСТИКА ---
+# ... (Цей блок без змін) ...
+
+# --- РЕЙТИНГ ---
+# ... (Цей блок без змін) ...
+
+# --- ПРОФІЛЬ ---
+@dp.message(F.text == "👤 Мій Профіль")
+async def show_my_profile(message: Message):
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT name, car_brand, car_plate, platform FROM drivers WHERE user_id = ?", (message.from_user.id,))
+        profile = cursor.fetchone()
+    if profile:
+        name, car, plate, platform = profile
+        text = f"**👤 Ваш профіль:**\n\n**Ім'я:** {name}\n**Авто:** {car}\n**Номер:** {plate}\n**Платформа:** {platform}\n\nБажаєте змінити дані?"
+        buttons = [[InlineKeyboardButton(text="✏️ Редагувати профіль", callback_data="edit_profile_start")]]
+        await message.answer(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+@dp.callback_query(F.data == "edit_profile_start")
+async def edit_profile_start(callback: CallbackQuery, state: FSMContext):
+    buttons = [[InlineKeyboardButton(text="Ім'я", callback_data="edit_field_name")], [InlineKeyboardButton(text="Авто", callback_data="edit_field_car_brand")], [InlineKeyboardButton(text="Номер", callback_data="edit_field_car_plate")], [InlineKeyboardButton(text="Платформу", callback_data="edit_field_platform")]]
+    await callback.message.edit_text("Яке поле ви хочете змінити?", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await state.set_state(EditProfile.choosing_field)
+
+@dp.callback_query(EditProfile.choosing_field, F.data.startswith("edit_field_"))
+async def edit_profile_choose_field(callback: CallbackQuery, state: FSMContext):
+    # ВИПРАВЛЕНО ТУТ:
+    field = '_'.join(callback.data.split("_")[2:])
+    field_map = {'name': "ім'я", 'car_brand': "марку авто", 'car_plate': "номер авто", 'platform': "платформу"}
+    await state.update_data(field_to_edit=field)
+    await callback.message.edit_text(f"Введіть нове значення для поля '{field_map[field]}':")
+    await state.set_state(EditProfile.entering_new_value)
+    await callback.answer()
+
+@dp.message(EditProfile.entering_new_value)
+async def edit_profile_enter_value(message: Message, state: FSMContext):
+    user_data = await state.get_data()
+    field = user_data['field_to_edit']
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute(f"UPDATE drivers SET {field} = ? WHERE user_id = ?", (message.text, message.from_user.id))
+        conn.commit()
+    await message.answer("✅ Дані успішно оновлено!")
+    await state.clear()
+    await show_my_profile(message)
+
+# --- АДМІН-ПАНЕЛЬ ---
+@dp.message(Command("admin"))
+async def admin_panel(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID: return
+    keyboard = await get_admin_user_list_keyboard()
+    await message.answer("Доброго дня, Адміністраторе! 🧑‍🔧\nОберіть водія для редагування:", reply_markup=keyboard)
+    await state.set_state(AdminEdit.choosing_user)
+
+@dp.callback_query(AdminEdit.choosing_user, F.data.startswith("admin_page_"))
+async def admin_paginate_users(callback: CallbackQuery, state: FSMContext):
+    page = int(callback.data.split("_")[-1])
+    keyboard = await get_admin_user_list_keyboard(page)
+    await callback.message.edit_reply_markup(reply_markup=keyboard)
+    await callback.answer()
+
+@dp.callback_query(AdminEdit.choosing_user, F.data.startswith("admin_select_"))
+async def admin_select_user(callback: CallbackQuery, state: FSMContext):
+    user_id_to_edit = int(callback.data.split("_")[-1])
+    await state.update_data(user_to_edit=user_id_to_edit)
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM drivers WHERE user_id = ?", (user_id_to_edit,))
+        user_name = cursor.fetchone()[0]
+    buttons = [[InlineKeyboardButton(text="Ім'я", callback_data="admin_edit_name")], [InlineKeyboardButton(text="Авто", callback_data="admin_edit_car_brand")], [InlineKeyboardButton(text="Номер", callback_data="admin_edit_car_plate")], [InlineKeyboardButton(text="Платформу", callback_data="admin_edit_platform")], [InlineKeyboardButton(text="⬅️ Повернутись до списку", callback_data="admin_back_to_list")]]
+    await callback.message.edit_text(f"Ви обрали водія: **{user_name}**.\nЯке поле бажаєте змінити?", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode=ParseMode.MARKDOWN)
+    await state.set_state(AdminEdit.choosing_field)
+
+@dp.callback_query(AdminEdit.choosing_field, F.data.startswith("admin_edit_"))
+async def admin_choose_field(callback: CallbackQuery, state: FSMContext):
+    # І ВИПРАВЛЕНО ТУТ:
+    field = '_'.join(callback.data.split("_")[2:])
+    field_map = {'name': "ім'я", 'car_brand': "марку авто", 'car_plate': "номер авто", 'platform': "платформу"}
+    await state.update_data(field_to_edit=field)
+    await callback.message.edit_text(f"Введіть нове значення для поля **'{field_map[field]}'**:", parse_mode=ParseMode.MARKDOWN)
+    await state.set_state(AdminEdit.entering_new_value)
+    await callback.answer()
+
+@dp.callback_query(AdminEdit.choosing_field, F.data == "admin_back_to_list")
+async def admin_back_to_list(callback: CallbackQuery, state: FSMContext):
+    keyboard = await get_admin_user_list_keyboard()
+    await callback.message.edit_text("Оберіть водія для редагування:", reply_markup=keyboard)
+    await state.set_state(AdminEdit.choosing_user)
+
+@dp.message(AdminEdit.entering_new_value)
+async def admin_enter_new_value(message: Message, state: FSMContext):
+    user_data = await state.get_data()
+    field, user_id, new_value = user_data['field_to_edit'], user_data['user_to_edit'], message.text
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute(f"UPDATE drivers SET {field} = ? WHERE user_id = ?", (new_value, user_id))
+        conn.commit()
+    await message.answer("✅ Дані водія успішно оновлено!")
+    await state.clear()
+    keyboard = await get_admin_user_list_keyboard()
+    await message.answer("Оберіть наступного водія для редагування:", reply_markup=keyboard)
+    await state.set_state(AdminEdit.choosing_user)
+
+# --- АДМІН-ПАНЕЛЬ НАЛАШТУВАНЬ ---
+# ... (Цей блок без змін) ...
+
+# --- КОМАНДА ДЛЯ ПОВЕРНЕННЯ ГОЛОВНОГО МЕНЮ ---
+# ... (Цей блок без змін) ...
+
+# --- ОСНОВНА ФУНКЦІЯ ЗАПУСКУ ---
+# ... (Цей блок без змін) ...
+
+# (Примітка: для стислості я прибрав ті блоки коду, які не змінювалися, 
+# але в коді нижче вони всі присутні)
+
+# Повний код для копіювання:
+
 @dp.message(F.text == "✅ Додати Дохід/Чайові")
 async def add_income_menu(message: Message):
     buttons = [[InlineKeyboardButton(text="💰 Дохід", callback_data="add_transaction_дохід")], [InlineKeyboardButton(text="🎁 Чайові", callback_data="add_transaction_чай")]]
@@ -205,7 +314,6 @@ async def process_transaction_amount(message: Message, state: FSMContext):
     except ValueError:
         await message.answer("❌ Помилка. Введіть числове значення (напр., 150 або 95.50).")
 
-# --- СТАТИСТИКА ---
 @dp.message(F.text == "📊 Моя Статистика")
 async def show_my_stats(message: Message):
     user_id = message.from_user.id
@@ -258,7 +366,6 @@ async def show_advanced_stats(callback: CallbackQuery):
     await callback.message.edit_text(text, parse_mode=ParseMode.MARKDOWN)
     await callback.answer()
 
-# --- РЕЙТИНГ ---
 @dp.message(F.text == "🏆 Рейтинг Водіїв")
 async def show_rating(message: Message):
     with sqlite3.connect(DB_FILE) as conn:
@@ -280,101 +387,6 @@ async def show_rating(message: Message):
         return text
     await message.answer(f"🏆 **Рейтинг заробітку водіїв** 🏆\n\n{format_rating('🗓️ За Поточний Місяць', monthly_rating)}\n---\n{format_rating('🕰️ За Весь Час', all_time_rating)}", parse_mode=ParseMode.MARKDOWN)
 
-# --- ПРОФІЛЬ ---
-@dp.message(F.text == "👤 Мій Профіль")
-async def show_my_profile(message: Message):
-    with sqlite3.connect(DB_FILE) as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT name, car_brand, car_plate, platform FROM drivers WHERE user_id = ?", (message.from_user.id,))
-        profile = cursor.fetchone()
-    if profile:
-        name, car, plate, platform = profile
-        text = f"**👤 Ваш профіль:**\n\n**Ім'я:** {name}\n**Авто:** {car}\n**Номер:** {plate}\n**Платформа:** {platform}\n\nБажаєте змінити дані?"
-        buttons = [[InlineKeyboardButton(text="✏️ Редагувати профіль", callback_data="edit_profile_start")]]
-        await message.answer(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
-
-@dp.callback_query(F.data == "edit_profile_start")
-async def edit_profile_start(callback: CallbackQuery, state: FSMContext):
-    buttons = [[InlineKeyboardButton(text="Ім'я", callback_data="edit_field_name")], [InlineKeyboardButton(text="Авто", callback_data="edit_field_car_brand")], [InlineKeyboardButton(text="Номер", callback_data="edit_field_car_plate")], [InlineKeyboardButton(text="Платформу", callback_data="edit_field_platform")]]
-    await callback.message.edit_text("Яке поле ви хочете змінити?", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
-    await state.set_state(EditProfile.choosing_field)
-
-@dp.callback_query(EditProfile.choosing_field, F.data.startswith("edit_field_"))
-async def edit_profile_choose_field(callback: CallbackQuery, state: FSMContext):
-    field = callback.data.split("_")[-1]
-    field_map = {'name': "ім'я", 'car_brand': "марку авто", 'car_plate': "номер авто", 'platform': "платформу"}
-    await state.update_data(field_to_edit=field)
-    await callback.message.edit_text(f"Введіть нове значення для поля '{field_map[field]}':")
-    await state.set_state(EditProfile.entering_new_value)
-
-@dp.message(EditProfile.entering_new_value)
-async def edit_profile_enter_value(message: Message, state: FSMContext):
-    user_data = await state.get_data()
-    field = user_data['field_to_edit']
-    with sqlite3.connect(DB_FILE) as conn:
-        cursor = conn.cursor()
-        cursor.execute(f"UPDATE drivers SET {field} = ? WHERE user_id = ?", (message.text, message.from_user.id))
-        conn.commit()
-    await message.answer("✅ Дані успішно оновлено!")
-    await state.clear()
-    await show_my_profile(message)
-
-# --- АДМІН-ПАНЕЛЬ ---
-@dp.message(Command("admin"))
-async def admin_panel(message: Message, state: FSMContext):
-    if message.from_user.id != ADMIN_ID: return
-    keyboard = await get_admin_user_list_keyboard()
-    await message.answer("Доброго дня, Адміністраторе! 🧑‍🔧\nОберіть водія для редагування:", reply_markup=keyboard)
-    await state.set_state(AdminEdit.choosing_user)
-
-@dp.callback_query(AdminEdit.choosing_user, F.data.startswith("admin_page_"))
-async def admin_paginate_users(callback: CallbackQuery, state: FSMContext):
-    page = int(callback.data.split("_")[-1])
-    keyboard = await get_admin_user_list_keyboard(page)
-    await callback.message.edit_reply_markup(reply_markup=keyboard)
-    await callback.answer()
-
-@dp.callback_query(AdminEdit.choosing_user, F.data.startswith("admin_select_"))
-async def admin_select_user(callback: CallbackQuery, state: FSMContext):
-    user_id_to_edit = int(callback.data.split("_")[-1])
-    await state.update_data(user_to_edit=user_id_to_edit)
-    with sqlite3.connect(DB_FILE) as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT name FROM drivers WHERE user_id = ?", (user_id_to_edit,))
-        user_name = cursor.fetchone()[0]
-    buttons = [[InlineKeyboardButton(text="Ім'я", callback_data="admin_edit_name")], [InlineKeyboardButton(text="Авто", callback_data="admin_edit_car_brand")], [InlineKeyboardButton(text="Номер", callback_data="admin_edit_car_plate")], [InlineKeyboardButton(text="Платформу", callback_data="admin_edit_platform")], [InlineKeyboardButton(text="⬅️ Повернутись до списку", callback_data="admin_back_to_list")]]
-    await callback.message.edit_text(f"Ви обрали водія: **{user_name}**.\nЯке поле бажаєте змінити?", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode=ParseMode.MARKDOWN)
-    await state.set_state(AdminEdit.choosing_field)
-
-@dp.callback_query(AdminEdit.choosing_field, F.data.startswith("admin_edit_"))
-async def admin_choose_field(callback: CallbackQuery, state: FSMContext):
-    field = callback.data.split("_")[-1]
-    field_map = {'name': "ім'я", 'car_brand': "марку авто", 'car_plate': "номер авто", 'platform': "платформу"}
-    await state.update_data(field_to_edit=field)
-    await callback.message.edit_text(f"Введіть нове значення для поля **'{field_map[field]}'**:", parse_mode=ParseMode.MARKDOWN)
-    await state.set_state(AdminEdit.entering_new_value)
-
-@dp.callback_query(AdminEdit.choosing_field, F.data == "admin_back_to_list")
-async def admin_back_to_list(callback: CallbackQuery, state: FSMContext):
-    keyboard = await get_admin_user_list_keyboard()
-    await callback.message.edit_text("Оберіть водія для редагування:", reply_markup=keyboard)
-    await state.set_state(AdminEdit.choosing_user)
-
-@dp.message(AdminEdit.entering_new_value)
-async def admin_enter_new_value(message: Message, state: FSMContext):
-    user_data = await state.get_data()
-    field, user_id, new_value = user_data['field_to_edit'], user_data['user_to_edit'], message.text
-    with sqlite3.connect(DB_FILE) as conn:
-        cursor = conn.cursor()
-        cursor.execute(f"UPDATE drivers SET {field} = ? WHERE user_id = ?", (new_value, user_id))
-        conn.commit()
-    await message.answer("✅ Дані водія успішно оновлено!")
-    await state.clear()
-    keyboard = await get_admin_user_list_keyboard()
-    await message.answer("Оберіть наступного водія для редагування:", reply_markup=keyboard)
-    await state.set_state(AdminEdit.choosing_user)
-
-# --- АДМІН-ПАНЕЛЬ НАЛАШТУВАНЬ ---
 @dp.message(Command("settings"))
 async def admin_settings(message: Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID: return
@@ -409,13 +421,11 @@ async def settings_set_new_password(message: Message, state: FSMContext):
     await message.answer(f"✅ Пароль успішно змінено на `{new_password}`", parse_mode=ParseMode.MARKDOWN)
     await cmd_start(message, state) # Повертаємо до головного меню
 
-# --- КОМАНДА ДЛЯ ПОВЕРНЕННЯ ГОЛОВНОГО МЕНЮ ---
 @dp.message(Command("menu"))
 async def show_main_menu(message: Message, state: FSMContext):
     await state.clear() # Скидаємо будь-які активні стани
     await message.answer("Головне меню:", reply_markup=get_main_menu_keyboard())
 
-# --- ОСНОВНА ФУНКЦІЯ ЗАПУСКУ ---
 async def set_main_menu(bot: Bot):
     """Створює кнопку 'Меню' в інтерфейсі Telegram."""
     main_menu_commands = [
