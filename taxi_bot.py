@@ -1,4 +1,4 @@
-# taxi_bot.py (Версія 10.0 - Контекстні кнопки та професійний UX)
+# taxi_bot.py (Версія 11.0 - Розширений рейтинг та фінансове керування)
 
 import asyncio
 import sqlite3
@@ -35,27 +35,22 @@ def init_db():
 
 # --- СТАНИ FSM ---
 class Registration(StatesGroup):
-    waiting_for_password = State()
-    waiting_for_name = State()
-    waiting_for_car_brand = State()
-    waiting_for_car_plate = State()
-    waiting_for_platform = State()
+    waiting_for_password, waiting_for_name, waiting_for_car_brand, waiting_for_car_plate, waiting_for_platform = [State() for _ in range(5)]
 
 class AddTransaction(StatesGroup):
     waiting_for_amount = State()
 
 class EditProfile(StatesGroup):
-    choosing_field = State()
-    entering_new_value = State()
+    choosing_field, entering_new_value = [State() for _ in range(2)]
 
 class AdminEdit(StatesGroup):
-    choosing_user = State()
-    choosing_field = State()
-    entering_new_value = State()
+    choosing_user, choosing_field, entering_new_value = [State() for _ in range(3)]
+    managing_finances = State()
+    adding_transaction_type = State()
+    adding_transaction_amount = State()
 
 class AdminSettings(StatesGroup):
-    choosing_setting = State()
-    entering_new_password = State()
+    choosing_setting, entering_new_password = [State() for _ in range(2)]
 
 # --- КЛАВІАТУРИ ---
 def get_main_menu_keyboard():
@@ -67,7 +62,6 @@ def get_main_menu_keyboard():
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True, row_width=2)
 
 def get_cancel_keyboard() -> InlineKeyboardMarkup:
-    """Створює клавіатуру з однією кнопкою 'Відмінити'."""
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Відмінити", callback_data="action_cancel")]])
 
 async def get_admin_user_list_keyboard(page: int = 0) -> InlineKeyboardMarkup:
@@ -80,7 +74,7 @@ async def get_admin_user_list_keyboard(page: int = 0) -> InlineKeyboardMarkup:
         total_users = cursor.fetchone()[0]
     keyboard = []
     for user_id, name in users:
-        keyboard.append([InlineKeyboardButton(text=name, callback_data=f"admin_select_{user_id}")])
+        keyboard.append([InlineKeyboardButton(text=name, callback_data=f"admin_select_user_{user_id}")])
     nav_buttons = []
     if page > 0:
         nav_buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"admin_page_{page - 1}"))
@@ -90,6 +84,14 @@ async def get_admin_user_list_keyboard(page: int = 0) -> InlineKeyboardMarkup:
         keyboard.append(nav_buttons)
     keyboard.append([InlineKeyboardButton(text="❌ Завершити", callback_data="admin_finish")])
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+async def get_admin_user_management_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    buttons = [
+        [InlineKeyboardButton(text="✏️ Редагувати профіль", callback_data=f"admin_edit_profile_{user_id}")],
+        [InlineKeyboardButton(text="💰 Керувати фінансами", callback_data=f"admin_manage_finances_{user_id}")],
+        [InlineKeyboardButton(text="⬅️ Повернутись до списку", callback_data="admin_back_to_list")]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 # --- ДОПОМІЖНІ ФУНКЦІЇ ---
 def format_currency(amount: float) -> str:
@@ -109,9 +111,20 @@ dp = Dispatcher()
 
 @dp.callback_query(F.data == "action_cancel")
 async def handle_cancel_action(callback: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await callback.message.edit_text("Дію скасовано.")
-    await callback.message.answer("Ви повернулись у головне меню.", reply_markup=get_main_menu_keyboard())
+    current_state = await state.get_state()
+    if current_state is not None and current_state.startswith("AdminEdit"):
+        user_data = await state.get_data()
+        user_id = user_data.get('user_to_edit')
+        await callback.message.edit_text("Дію скасовано.")
+        await state.set_state(AdminEdit.choosing_user)
+        if user_id:
+            await admin_select_user(callback, state, user_id_from_context=user_id)
+        else:
+             await admin_finish(callback, state)
+    else:
+        await state.clear()
+        await callback.message.edit_text("Дію скасовано.")
+        await callback.message.answer("Ви повернулись у головне меню.", reply_markup=get_main_menu_keyboard())
     await callback.answer()
 
 @dp.message(CommandStart())
@@ -256,21 +269,47 @@ async def show_rating(message: Message):
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
         current_month = datetime.now().strftime('%Y-%m')
-        query = "SELECT d.name, d.car_brand, d.car_plate, SUM(t.amount) FROM transactions t JOIN drivers d ON t.driver_id = d.user_id WHERE t.type IN ('дохід', 'чай') AND strftime('%Y-%m', t.date) = ? GROUP BY d.user_id ORDER BY SUM(t.amount) DESC LIMIT 10"
-        cursor.execute(query, (current_month,))
-        monthly_rating = cursor.fetchall()
-        query_all_time = "SELECT d.name, d.car_brand, d.car_plate, SUM(t.amount) FROM transactions t JOIN drivers d ON t.driver_id = d.user_id WHERE t.type IN ('дохід', 'чай') GROUP BY d.user_id ORDER BY SUM(t.amount) DESC LIMIT 10"
-        cursor.execute(query_all_time)
-        all_time_rating = cursor.fetchall()
-    def format_rating(title, rating_data):
-        text = f"**{title}**\n"
-        if not rating_data: return text + "Ще немає даних для рейтингу.\n"
-        medals = ["🥇", "🥈", "🥉"]
-        for i, (name, car, plate, total) in enumerate(rating_data):
-            place = medals[i] if i < 3 else f"**{i+1}.**"
-            text += f"{place} {name} ({car}, {plate}) - **{format_currency(total)}**\n"
-        return text
-    await message.answer(f"🏆 **Рейтинг заробітку водіїв** 🏆\n\n{format_rating('🗓️ За Поточний Місяць', monthly_rating)}\n---\n{format_rating('🕰️ За Весь Час', all_time_rating)}", parse_mode=ParseMode.MARKDOWN)
+        
+        cursor.execute("SELECT DISTINCT driver_id FROM transactions WHERE strftime('%Y-%m', date) = ?", (current_month,))
+        driver_ids = [row[0] for row in cursor.fetchall()]
+
+        rating_data = []
+        for user_id in driver_ids:
+            cursor.execute("SELECT name, car_brand, car_plate FROM drivers WHERE user_id = ?", (user_id,))
+            driver_info = cursor.fetchone()
+            if not driver_info: continue
+
+            cursor.execute("SELECT SUM(amount) FROM transactions WHERE driver_id = ? AND type IN ('дохід', 'чай') AND strftime('%Y-%m', date) = ?", (user_id, current_month))
+            income = cursor.fetchone()[0] or 0
+
+            cursor.execute("SELECT type, SUM(amount) FROM transactions WHERE driver_id = ? AND type NOT IN ('дохід', 'чай') AND strftime('%Y-%m', date) = ? GROUP BY type", (user_id, current_month))
+            expenses_list = cursor.fetchall()
+            expenses_total = sum(amount for _, amount in expenses_list)
+            
+            net_income = income - expenses_total
+            rating_data.append({"info": driver_info, "net_income": net_income, "expenses": dict(expenses_list)})
+
+    sorted_rating = sorted(rating_data, key=lambda x: x['net_income'], reverse=True)[:10]
+
+    text = f"🏆 **Рейтинг водіїв за чистим прибутком** 🏆\n_(за поточний місяць)_\n\n"
+    if not sorted_rating:
+        text += "Ще немає даних для формування рейтингу в цьому місяці."
+    
+    medals = ["🥇", "🥈", "🥉"]
+    for i, data in enumerate(sorted_rating):
+        place = medals[i] if i < 3 else f"**{i+1}.**"
+        name, car, plate = data['info']
+        
+        text += f"{place} **{name}** ({car}, {plate})\n"
+        text += f"   💰 **Чистий прибуток: {format_currency(data['net_income'])}**\n"
+        
+        if data['expenses']:
+            text += f"   *Витрати:*\n"
+            for exp_type, amount in data['expenses'].items():
+                text += f"     - {exp_type.capitalize()}: {format_currency(amount)}\n"
+        text += "---\n"
+
+    await message.answer(text, parse_mode=ParseMode.MARKDOWN)
 
 @dp.message(F.text == "👤 Мій Профіль")
 async def show_my_profile(message: Message):
@@ -314,8 +353,9 @@ async def edit_profile_enter_value(message: Message, state: FSMContext):
 @dp.message(Command("admin"))
 async def admin_panel(message: Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID: return
+    await state.clear()
     keyboard = await get_admin_user_list_keyboard()
-    await message.answer("Доброго дня, Адміністраторе! 🧑‍🔧\nОберіть водія для редагування:", reply_markup=keyboard)
+    await message.answer("Доброго дня, Адміністраторе! 🧑‍🔧\nОберіть водія для керування:", reply_markup=keyboard)
     await state.set_state(AdminEdit.choosing_user)
 
 @dp.callback_query(AdminEdit.choosing_user, F.data.startswith("admin_page_"))
@@ -325,17 +365,37 @@ async def admin_paginate_users(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_reply_markup(reply_markup=keyboard)
     await callback.answer()
 
-@dp.callback_query(AdminEdit.choosing_user, F.data.startswith("admin_select_"))
-async def admin_select_user(callback: CallbackQuery, state: FSMContext):
-    user_id_to_edit = int(callback.data.split("_")[-1])
+@dp.callback_query(AdminEdit.choosing_user, F.data.startswith("admin_select_user_"))
+async def admin_select_user(callback: CallbackQuery, state: FSMContext, user_id_from_context: int = None):
+    user_id_to_edit = user_id_from_context if user_id_from_context else int(callback.data.split("_")[-1])
     await state.update_data(user_to_edit=user_id_to_edit)
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT name FROM drivers WHERE user_id = ?", (user_id_to_edit,))
         user_name = cursor.fetchone()[0]
-    buttons = [[InlineKeyboardButton(text="Ім'я", callback_data="admin_edit_name")], [InlineKeyboardButton(text="Авто", callback_data="admin_edit_car_brand")], [InlineKeyboardButton(text="Номер", callback_data="admin_edit_car_plate")], [InlineKeyboardButton(text="Платформу", callback_data="admin_edit_platform")], [InlineKeyboardButton(text="⬅️ Повернутись до списку", callback_data="admin_back_to_list")]]
-    await callback.message.edit_text(f"Ви обрали водія: **{user_name}**.\nЯке поле бажаєте змінити?", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode=ParseMode.MARKDOWN)
+    keyboard = await get_admin_user_management_keyboard(user_id_to_edit)
+    await callback.message.edit_text(f"Керування водієм: **{user_name}**\nОберіть дію:", reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+    await callback.answer()
+
+@dp.callback_query(AdminEdit.choosing_user, F.data == "admin_back_to_list")
+async def admin_back_to_list(callback: CallbackQuery, state: FSMContext):
+    keyboard = await get_admin_user_list_keyboard()
+    await callback.message.edit_text("Оберіть водія для керування:", reply_markup=keyboard)
+    await callback.answer()
+
+@dp.callback_query(AdminEdit.choosing_user, F.data.startswith("admin_edit_profile_"))
+async def admin_edit_profile_start(callback: CallbackQuery, state: FSMContext):
+    user_id = int(callback.data.split("_")[-1])
+    buttons = [
+        [InlineKeyboardButton(text="Ім'я", callback_data="admin_edit_name")],
+        [InlineKeyboardButton(text="Авто", callback_data="admin_edit_car_brand")],
+        [InlineKeyboardButton(text="Номер", callback_data="admin_edit_car_plate")],
+        [InlineKeyboardButton(text="Платформу", callback_data="admin_edit_platform")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"admin_select_user_{user_id}")]
+    ]
+    await callback.message.edit_text("Яке поле профілю змінити?", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await state.set_state(AdminEdit.choosing_field)
+    await callback.answer()
 
 @dp.callback_query(AdminEdit.choosing_field, F.data.startswith("admin_edit_"))
 async def admin_choose_field(callback: CallbackQuery, state: FSMContext):
@@ -344,19 +404,6 @@ async def admin_choose_field(callback: CallbackQuery, state: FSMContext):
     await state.update_data(field_to_edit=field)
     await callback.message.edit_text(f"Введіть нове значення для поля **'{field_map[field]}'**:", parse_mode=ParseMode.MARKDOWN, reply_markup=get_cancel_keyboard())
     await state.set_state(AdminEdit.entering_new_value)
-    await callback.answer()
-
-@dp.callback_query(AdminEdit.choosing_field, F.data == "admin_back_to_list")
-async def admin_back_to_list(callback: CallbackQuery, state: FSMContext):
-    keyboard = await get_admin_user_list_keyboard()
-    await callback.message.edit_text("Оберіть водія для редагування:", reply_markup=keyboard)
-    await state.set_state(AdminEdit.choosing_user)
-
-@dp.callback_query(AdminEdit.choosing_user, F.data == "admin_finish")
-async def admin_finish(callback: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await callback.message.edit_text("Ви вийшли з режиму адміністрування.")
-    await callback.message.answer("Повернення до головного меню.", reply_markup=get_main_menu_keyboard())
     await callback.answer()
 
 @dp.message(AdminEdit.entering_new_value)
@@ -368,10 +415,94 @@ async def admin_enter_new_value(message: Message, state: FSMContext):
         cursor.execute(f"UPDATE drivers SET {field} = ? WHERE user_id = ?", (new_value, user_id))
         conn.commit()
     await message.answer("✅ Дані водія успішно оновлено!")
-    await state.clear()
-    keyboard = await get_admin_user_list_keyboard()
-    await message.answer("Оберіть наступного водія для редагування:", reply_markup=keyboard)
     await state.set_state(AdminEdit.choosing_user)
+    # Створюємо фейковий callback для повернення в меню
+    fake_callback_message = types.Message(message_id=0, date=datetime.now(), chat=message.chat)
+    fake_callback = types.CallbackQuery(id="0", from_user=message.from_user, message=fake_callback_message, data="")
+    await admin_select_user(fake_callback, state, user_id_from_context=user_id)
+
+@dp.callback_query(AdminEdit.choosing_user, F.data.startswith("admin_manage_finances_"))
+async def admin_manage_finances(callback: CallbackQuery, state: FSMContext):
+    user_id = (await state.get_data())['user_to_edit']
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, date, type, amount FROM transactions WHERE driver_id = ? ORDER BY date DESC LIMIT 10", (user_id,))
+        transactions = cursor.fetchall()
+        cursor.execute("SELECT name FROM drivers WHERE user_id=?", (user_id,))
+        user_name = cursor.fetchone()[0]
+    text = f"**Останні 10 операцій водія {user_name}:**\n\n"
+    if not transactions: text += "Операцій ще не було."
+    keyboard = []
+    for id, date, type, amount in transactions:
+        sign = "🟢" if type in ['дохід', 'чай'] else "🔴"
+        date_str = datetime.fromisoformat(date).strftime('%d.%m %H:%M')
+        text += f"{sign} {date_str} - {type.capitalize()}: {format_currency(amount)}\n"
+        keyboard.append([InlineKeyboardButton(text=f"❌ Видалити запис №{id}", callback_data=f"admin_delete_trans_{id}")])
+    keyboard.append([InlineKeyboardButton(text="✅ Додати транзакцію", callback_data=f"admin_add_trans_{user_id}")])
+    keyboard.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"admin_select_user_{user_id}")])
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard), parse_mode=ParseMode.MARKDOWN)
+    await state.set_state(AdminEdit.managing_finances)
+    await callback.answer()
+
+@dp.callback_query(AdminEdit.managing_finances, F.data.startswith("admin_delete_trans_"))
+async def admin_delete_transaction(callback: CallbackQuery, state: FSMContext):
+    transaction_id = int(callback.data.split("_")[-1])
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM transactions WHERE id = ?", (transaction_id,))
+        conn.commit()
+    await callback.answer("✅ Транзакцію видалено.", show_alert=True)
+    await admin_manage_finances(callback, state)
+
+@dp.callback_query(AdminEdit.managing_finances, F.data.startswith("admin_add_trans_"))
+async def admin_add_transaction_start(callback: CallbackQuery, state: FSMContext):
+    user_id = (await state.get_data())['user_to_edit']
+    buttons = [
+        [InlineKeyboardButton(text="💰 Дохід", callback_data="admin_add_type_дохід"), InlineKeyboardButton(text="🎁 Чайові", callback_data="admin_add_type_чай")],
+        [InlineKeyboardButton(text="⛽ Паливо", callback_data="admin_add_type_паливо"), InlineKeyboardButton(text="🧼 Мийка", callback_data="admin_add_type_мийка")],
+        [InlineKeyboardButton(text="🍔 Їжа", callback_data="admin_add_type_їжа"), InlineKeyboardButton(text="🛠️ Ремонт", callback_data="admin_add_type_ремонт")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"admin_manage_finances_{user_id}")]
+    ]
+    await callback.message.edit_text("Оберіть тип транзакції для додавання:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await state.set_state(AdminEdit.adding_transaction_type)
+    await callback.answer()
+
+@dp.callback_query(AdminEdit.adding_transaction_type, F.data.startswith("admin_add_type_"))
+async def admin_add_transaction_type(callback: CallbackQuery, state: FSMContext):
+    trans_type = callback.data.split("_")[-1]
+    await state.update_data(admin_trans_type=trans_type)
+    await callback.message.edit_text(f"Введіть суму для '{trans_type.capitalize()}':", reply_markup=get_cancel_keyboard())
+    await state.set_state(AdminEdit.adding_transaction_amount)
+    await callback.answer()
+
+@dp.message(AdminEdit.adding_transaction_amount)
+async def admin_add_transaction_amount(message: Message, state: FSMContext):
+    try:
+        amount = float(message.text.replace(',', '.'))
+        if amount <= 0:
+            await message.answer("❌ Сума має бути більшою за нуль.", reply_markup=get_cancel_keyboard())
+            return
+        user_data = await state.get_data()
+        user_id = user_data['user_to_edit']
+        trans_type = user_data['admin_trans_type']
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute("INSERT INTO transactions (driver_id, type, amount) VALUES (?, ?, ?)", (user_id, trans_type, amount))
+            conn.commit()
+        await message.answer("✅ Транзакцію успішно додано!")
+        fake_callback_message = types.Message(message_id=0, date=datetime.now(), chat=message.chat)
+        fake_callback = types.CallbackQuery(id="0", from_user=message.from_user, message=fake_callback_message, data=f"admin_manage_finances_{user_id}")
+        await state.set_state(AdminEdit.managing_finances)
+        await admin_manage_finances(fake_callback, state)
+    except ValueError:
+        await message.answer("❌ Помилка. Введіть числове значення.", reply_markup=get_cancel_keyboard())
+
+@dp.callback_query(AdminEdit.choosing_user, F.data == "admin_finish")
+async def admin_finish(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text("Ви вийшли з режиму адміністрування.")
+    await callback.message.answer("Повернення до головного меню.", reply_markup=get_main_menu_keyboard())
+    await callback.answer()
 
 @dp.message(Command("settings"))
 async def admin_settings(message: Message, state: FSMContext):
@@ -407,11 +538,6 @@ async def settings_set_new_password(message: Message, state: FSMContext):
     await message.answer(f"✅ Пароль успішно змінено на `{new_password}`", parse_mode=ParseMode.MARKDOWN)
     await cmd_start(message, state)
 
-@dp.message(Command("menu"))
-async def show_main_menu(message: Message, state: FSMContext):
-    await state.clear()
-    await message.answer("Головне меню:", reply_markup=get_main_menu_keyboard())
-
 async def set_main_menu(bot: Bot):
     main_menu_commands = [
         BotCommand(command="/start", description="Перезапустити бота"),
@@ -428,7 +554,6 @@ async def main():
 
     bot = Bot(token=BOT_TOKEN)
     
-    # Реєстрація всіх обробників в Dispatcher
     dp.callback_query.register(handle_cancel_action, F.data == "action_cancel")
     dp.message.register(cmd_start, CommandStart())
     dp.message.register(show_main_menu, Command("menu"))
@@ -451,15 +576,21 @@ async def main():
     dp.message.register(edit_profile_enter_value, EditProfile.entering_new_value)
     dp.message.register(admin_panel, Command("admin"))
     dp.callback_query.register(admin_paginate_users, AdminEdit.choosing_user, F.data.startswith("admin_page_"))
-    dp.callback_query.register(admin_select_user, AdminEdit.choosing_user, F.data.startswith("admin_select_"))
-    dp.callback_query.register(admin_finish, AdminEdit.choosing_user, F.data == "admin_finish")
+    dp.callback_query.register(admin_select_user, AdminEdit.choosing_user, F.data.startswith("admin_select_user_"))
+    dp.callback_query.register(admin_back_to_list, AdminEdit.choosing_user, F.data == "admin_back_to_list")
+    dp.callback_query.register(admin_edit_profile_start, AdminEdit.choosing_user, F.data.startswith("admin_edit_profile_"))
     dp.callback_query.register(admin_choose_field, AdminEdit.choosing_field, F.data.startswith("admin_edit_"))
-    dp.callback_query.register(admin_back_to_list, AdminEdit.choosing_field, F.data == "admin_back_to_list")
     dp.message.register(admin_enter_new_value, AdminEdit.entering_new_value)
+    dp.callback_query.register(admin_manage_finances, AdminEdit.choosing_user, F.data.startswith("admin_manage_finances_"))
+    dp.callback_query.register(admin_delete_transaction, AdminEdit.managing_finances, F.data.startswith("admin_delete_trans_"))
+    dp.callback_query.register(admin_add_transaction_start, AdminEdit.managing_finances, F.data.startswith("admin_add_trans_"))
+    dp.callback_query.register(admin_add_transaction_type, AdminEdit.adding_transaction_type, F.data.startswith("admin_add_type_"))
+    dp.message.register(admin_add_transaction_amount, AdminEdit.adding_transaction_amount)
+    dp.callback_query.register(admin_finish, AdminEdit.choosing_user, F.data == "admin_finish")
     dp.message.register(admin_settings, Command("settings"))
     dp.callback_query.register(settings_change_password_prompt, AdminSettings.choosing_setting, F.data == "settings_change_password")
     dp.message.register(settings_set_new_password, AdminSettings.entering_new_password)
-    
+
     init_db()
     await set_main_menu(bot)
     logging.info("Бот запускається...")
