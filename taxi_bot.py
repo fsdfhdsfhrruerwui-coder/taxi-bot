@@ -1,4 +1,4 @@
-# taxi_bot.py (Версія 11.1 - Виправлення NameError та фінальна перевірка)
+# taxi_bot.py (Версія 11.2 - Виправлення NameError та фінальна перевірка)
 
 import asyncio
 import sqlite3
@@ -525,6 +525,12 @@ async def settings_set_new_password(message: Message, state: FSMContext):
     await state.clear()
     await message.answer(f"✅ Пароль успішно змінено на `{new_password}`", parse_mode=ParseMode.MARKDOWN)
     await cmd_start(message, state)
+
+# ВИПРАВЛЕНО: Додано відсутню функцію show_main_menu
+@dp.message(Command("menu"))
+async def show_main_menu(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Головне меню:", reply_markup=get_main_menu_keyboard())
 
 async def set_main_menu(bot: Bot):
     main_menu_commands = [
