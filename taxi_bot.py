@@ -1,4 +1,4 @@
-# taxi_bot.py (Версія 11.0 - Розширений рейтинг та фінансове керування)
+# taxi_bot.py (Версія 11.1 - Виправлення NameError та фінальна перевірка)
 
 import asyncio
 import sqlite3
@@ -269,46 +269,35 @@ async def show_rating(message: Message):
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
         current_month = datetime.now().strftime('%Y-%m')
-        
         cursor.execute("SELECT DISTINCT driver_id FROM transactions WHERE strftime('%Y-%m', date) = ?", (current_month,))
         driver_ids = [row[0] for row in cursor.fetchall()]
-
         rating_data = []
         for user_id in driver_ids:
             cursor.execute("SELECT name, car_brand, car_plate FROM drivers WHERE user_id = ?", (user_id,))
             driver_info = cursor.fetchone()
             if not driver_info: continue
-
             cursor.execute("SELECT SUM(amount) FROM transactions WHERE driver_id = ? AND type IN ('дохід', 'чай') AND strftime('%Y-%m', date) = ?", (user_id, current_month))
             income = cursor.fetchone()[0] or 0
-
             cursor.execute("SELECT type, SUM(amount) FROM transactions WHERE driver_id = ? AND type NOT IN ('дохід', 'чай') AND strftime('%Y-%m', date) = ? GROUP BY type", (user_id, current_month))
             expenses_list = cursor.fetchall()
             expenses_total = sum(amount for _, amount in expenses_list)
-            
             net_income = income - expenses_total
             rating_data.append({"info": driver_info, "net_income": net_income, "expenses": dict(expenses_list)})
-
     sorted_rating = sorted(rating_data, key=lambda x: x['net_income'], reverse=True)[:10]
-
     text = f"🏆 **Рейтинг водіїв за чистим прибутком** 🏆\n_(за поточний місяць)_\n\n"
     if not sorted_rating:
         text += "Ще немає даних для формування рейтингу в цьому місяці."
-    
     medals = ["🥇", "🥈", "🥉"]
     for i, data in enumerate(sorted_rating):
         place = medals[i] if i < 3 else f"**{i+1}.**"
         name, car, plate = data['info']
-        
         text += f"{place} **{name}** ({car}, {plate})\n"
         text += f"   💰 **Чистий прибуток: {format_currency(data['net_income'])}**\n"
-        
         if data['expenses']:
             text += f"   *Витрати:*\n"
             for exp_type, amount in data['expenses'].items():
                 text += f"     - {exp_type.capitalize()}: {format_currency(amount)}\n"
         text += "---\n"
-
     await message.answer(text, parse_mode=ParseMode.MARKDOWN)
 
 @dp.message(F.text == "👤 Мій Профіль")
@@ -416,7 +405,6 @@ async def admin_enter_new_value(message: Message, state: FSMContext):
         conn.commit()
     await message.answer("✅ Дані водія успішно оновлено!")
     await state.set_state(AdminEdit.choosing_user)
-    # Створюємо фейковий callback для повернення в меню
     fake_callback_message = types.Message(message_id=0, date=datetime.now(), chat=message.chat)
     fake_callback = types.CallbackQuery(id="0", from_user=message.from_user, message=fake_callback_message, data="")
     await admin_select_user(fake_callback, state, user_id_from_context=user_id)
@@ -490,7 +478,7 @@ async def admin_add_transaction_amount(message: Message, state: FSMContext):
             cursor.execute("INSERT INTO transactions (driver_id, type, amount) VALUES (?, ?, ?)", (user_id, trans_type, amount))
             conn.commit()
         await message.answer("✅ Транзакцію успішно додано!")
-        fake_callback_message = types.Message(message_id=0, date=datetime.now(), chat=message.chat)
+        fake_callback_message = types.Message(message_id=message.message_id + 1, date=datetime.now(), chat=message.chat)
         fake_callback = types.CallbackQuery(id="0", from_user=message.from_user, message=fake_callback_message, data=f"admin_manage_finances_{user_id}")
         await state.set_state(AdminEdit.managing_finances)
         await admin_manage_finances(fake_callback, state)
@@ -590,7 +578,7 @@ async def main():
     dp.message.register(admin_settings, Command("settings"))
     dp.callback_query.register(settings_change_password_prompt, AdminSettings.choosing_setting, F.data == "settings_change_password")
     dp.message.register(settings_set_new_password, AdminSettings.entering_new_password)
-
+    
     init_db()
     await set_main_menu(bot)
     logging.info("Бот запускається...")
