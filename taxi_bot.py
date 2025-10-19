@@ -1,10 +1,12 @@
-# taxi_bot.py (Версія 12.1 - Фінальне виправлення NameError)
+# taxi_bot.py (Версія 12.2 - З веб-сервером для безкоштовного хостингу Render)
 
 import asyncio
 import sqlite3
 import logging
 import os
 from datetime import datetime, timedelta
+from threading import Thread
+from flask import Flask
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import CommandStart, Command
@@ -20,6 +22,17 @@ ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 USERS_PER_PAGE = 5
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# --- НАЛАШТУВАННЯ "ШИРМИ" (Flask) для Render ---
+app = Flask(__name__)
+
+@app.route('/')
+def index():
+    return "Bot is running!"
+
+def run_flask():
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
 
 # --- БАЗА ДАНИХ (SQLite) ---
 DB_FILE = "taxi_drivers.db"
@@ -437,7 +450,6 @@ async def admin_manage_finances(callback: CallbackQuery, state: FSMContext):
     for id, date, type, amount in transactions:
         sign = "🟢" if type in ['дохід', 'чай'] else "🔴"
         date_str = datetime.fromisoformat(date).strftime('%d.%m %H:%M')
-        # Змінено: тепер одна лінія з двома кнопками
         text += f"{sign} {date_str} - {type.capitalize()}: {format_currency(amount)}\n"
         keyboard.append([
             InlineKeyboardButton(text=f"✏️ Ред. №{id}", callback_data=f"admin_edit_trans_{id}"),
@@ -531,7 +543,7 @@ async def admin_add_transaction_amount(message: Message, state: FSMContext):
     except ValueError:
         await message.answer("❌ Помилка. Введіть числове значення.", reply_markup=get_cancel_keyboard())
 
-@dp.callback_query(F.data == "admin_finish", AdminEdit.choosing_user)
+@dp.callback_query(AdminEdit.choosing_user, F.data == "admin_finish")
 async def admin_finish(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.message.edit_text("Ви вийшли з режиму адміністрування.")
@@ -588,7 +600,6 @@ async def main():
 
     bot = Bot(token=BOT_TOKEN)
     
-    # Реєстрація всіх обробників
     dp.callback_query.register(handle_cancel_action, F.data == "action_cancel")
     dp.message.register(cmd_start, CommandStart())
     dp.message.register(show_main_menu, Command("menu"))
@@ -635,6 +646,10 @@ async def main():
 
 if __name__ == '__main__':
     try:
+        # Запускаємо "ширму" в окремому потоці для Render
+        flask_thread = Thread(target=run_flask)
+        flask_thread.start()
+        # Запускаємо основну логіку бота
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         logging.info("Бот зупинено.")
